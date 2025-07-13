@@ -1,6 +1,5 @@
 [![unlicense](https://img.shields.io/badge/un-license-green.svg?style=flat)](https://unlicense.org)
 [![Mozilla Add-on](https://img.shields.io/amo/users/soundfixer?color=orange&logo=firefox-browser&logoColor=white)](https://addons.mozilla.org/firefox/addon/soundfixer/)
-[![Support me on Patreon](https://img.shields.io/badge/dynamic/json?logo=patreon&color=%23e85b46&label=support%20me%20on%20patreon&query=data.attributes.patron_count&suffix=%20patrons&url=https%3A%2F%2Fwww.patreon.com%2Fapi%2Fcampaigns%2F9395291)](https://www.patreon.com/valpackett)
 
 # SoundFixer
 
