@@ -17,6 +17,15 @@ No more "[Plug your headphones only halfway into the jack](https://news.ycombina
 
 Unfortunately, this extension doesn't work on all websites — specifically, we're not allowed to use the Web Audio API from a cross-domain `<audio>` source. Thankfully, YouTube is not cross-domain!
 
+## Testing the extension locally
+
+1. Download the latest release source code [here](https://github.com/raymond-1227/soundfixer-mv3/releases/latest)
+2. Decompress the .zip file
+3. Go to Chrome > Extensions > Manage Extensions
+4. Enable Developer mode (at the top right corner)
+5. Click "Load unpacked" (at the top left corner) and select the decompressed folder
+6. Enjoy!
+
 ## Contributing
 
 By participating in this project you agree to follow the [Contributor Code of Conduct](https://contributor-covenant.org/version/1/4/) and to release your contributions under the Unlicense.
