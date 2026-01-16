@@ -1,9 +1,10 @@
 [![unlicense](https://img.shields.io/badge/un-license-green.svg?style=flat)](https://unlicense.org)
-[![Mozilla Add-on](https://img.shields.io/amo/users/soundfixer?color=orange&logo=firefox-browser&logoColor=white)](https://addons.mozilla.org/firefox/addon/soundfixer/)
+[![Mozilla Add-on](https://img.shields.io/chrome-web-store/users/npbeifknocnjaoadlbboblifljieigog?logo=google-chrome&logoColor=white&color=blue
+)](https://chromewebstore.google.com/detail/soundfixer/npbeifknocnjaoadlbboblifljieigog)
 
 # SoundFixer
 
-![Screenshot](https://addons.mozilla.org/user-media/previews/full/291/291937.png?modified=1701909437)
+![Screenshot](https://lh3.googleusercontent.com/J0hcVJ1JhxnclFV-OdGuVVqScBDSQQvLRuoEmDNb6831Cfn16pZsnRCsOLGRk3coXKJdYwPOdyvARHZj-BbopItl=s1280-w1280-h800)
 
 This project aims to solve issues torwards Google Chrome's new policy where extensions that don't comply Manifest V3 would no longer work.
 
