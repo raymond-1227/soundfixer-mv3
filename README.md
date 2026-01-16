@@ -6,7 +6,7 @@
 
 ![Screenshot](https://lh3.googleusercontent.com/J0hcVJ1JhxnclFV-OdGuVVqScBDSQQvLRuoEmDNb6831Cfn16pZsnRCsOLGRk3coXKJdYwPOdyvARHZj-BbopItl=s1280-w1280-h800)
 
-This project aims to solve issues torwards Google Chrome's new policy where extensions that don't comply Manifest V3 would no longer work.
+This project aims to solve issues towards Google Chrome's new policy where extensions that don't comply Manifest V3 would no longer work.
 
 This extension lets you fix annoying sound problems on the web (e.g. in YouTube videos): sound in one channel only, too quiet even at maximum volume, too loud even at minimum volume.
 
