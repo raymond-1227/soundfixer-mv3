@@ -1,8 +1,8 @@
+# SoundFixer
+
 [![unlicense](https://img.shields.io/badge/un-license-green.svg?style=flat)](https://unlicense.org)
 [![Mozilla Add-on](https://img.shields.io/chrome-web-store/users/npbeifknocnjaoadlbboblifljieigog?logo=google-chrome&logoColor=white&color=blue
 )](https://chromewebstore.google.com/detail/soundfixer/npbeifknocnjaoadlbboblifljieigog)
-
-# SoundFixer
 
 ![Screenshot](https://lh3.googleusercontent.com/J0hcVJ1JhxnclFV-OdGuVVqScBDSQQvLRuoEmDNb6831Cfn16pZsnRCsOLGRk3coXKJdYwPOdyvARHZj-BbopItl=s1280-w1280-h800)
 
@@ -33,7 +33,7 @@ The popup controls are designed to quickly fix common audio issues:
 
 ## Testing the extension locally
 
-1. Download the latest release source code [here](https://github.com/raymond-1227/soundfixer-mv3/releases/latest)
+1. Download the latest release source code [from the releases page](https://github.com/raymond-1227/soundfixer-mv3/releases/latest)
 2. Decompress the .zip file
 3. Go to Chrome > Extensions > Manage Extensions
 4. Enable Developer mode (at the top right corner)
