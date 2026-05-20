@@ -1,77 +1,167 @@
 "use strict";
 
+// Active tab ID and extension state variables
 let tid = null;
+let defaultMode = "gain";
+
+// Map to store discovered media elements grouped by frame ID
+// Structure: Map<frameId, Map<elementId, elementData>>
 const frameMap = new Map();
+
+// Map to cache individual UI control handles for cross-panel synchronization
+// Structure: Map<"frameId-elementId", controlObject>
+const uiRegistry = new Map();
+
+// DOM Element Selectors
 const elementsList = document.getElementById("elements-list");
 const allElements = document.getElementById("all-elements");
 const indivElements = document.getElementById("individual-elements");
 const elementsTpl = document.getElementById("elements-tpl");
 
+/**
+ * Updates local cache and dispatches processing configurations to a specific target frame.
+ * Uses message passing instead of repetitive script execution for better performance.
+ * * @param {string|number} fid - The target frame ID.
+ * @param {string} elid - The unique identifier of the target media element.
+ * @param {Object} newSettings - Subset of audio configurations to be merged and applied.
+ */
 function applySettings(fid, elid, newSettings) {
-  return chrome.scripting.executeScript({
-    target: { tabId: tid, allFrames: true },
-    func: (ignoredFrameId, elementId, settings) => {
-      const el = document.querySelector(`[data-x-soundfixer-id="${elementId}"]`);
-      if (!el) return;
-      if (!el.xSoundFixerContext) {
-        const ctx = new AudioContext();
-        el.xSoundFixerContext = ctx;
-        el.xSoundFixerGain = ctx.createGain();
-        el.xSoundFixerPan = ctx.createStereoPanner();
-        el.xSoundFixerSplit = ctx.createChannelSplitter(2);
-        el.xSoundFixerMerge = ctx.createChannelMerger(2);
-        el.xSoundFixerSource = ctx.createMediaElementSource(el);
-        el.xSoundFixerSource.connect(el.xSoundFixerGain);
-        el.xSoundFixerGain.connect(el.xSoundFixerPan);
-        el.xSoundFixerPan.connect(ctx.destination);
-        el.xSoundFixerOriginalChannels = ctx.destination.channelCount;
-      }
-      if ("gain" in settings) {
-        el.xSoundFixerGain.gain.value = settings.gain;
-      }
-      if ("pan" in settings) {
-        el.xSoundFixerPan.pan.value = settings.pan;
-      }
-      if ("mono" in settings) {
-        el.xSoundFixerContext.destination.channelCount = settings.mono ? 1 : el.xSoundFixerOriginalChannels;
-      }
-      if ("flip" in settings) {
-        el.xSoundFixerFlipped = settings.flip;
-        el.xSoundFixerMerge.disconnect();
-        el.xSoundFixerPan.disconnect();
-        if (settings.flip) {
-          el.xSoundFixerPan.connect(el.xSoundFixerSplit);
-          el.xSoundFixerSplit.connect(el.xSoundFixerMerge, 0, 1);
-          el.xSoundFixerSplit.connect(el.xSoundFixerMerge, 1, 0);
-          el.xSoundFixerMerge.connect(el.xSoundFixerContext.destination);
-        } else {
-          el.xSoundFixerPan.connect(el.xSoundFixerContext.destination);
-        }
-      }
-      el.xSoundFixerSettings = {
-        gain: el.xSoundFixerGain.gain.value,
-        pan: el.xSoundFixerPan.pan.value,
-        mono: el.xSoundFixerContext.destination.channelCount === 1,
-        flip: el.xSoundFixerFlipped,
-      };
+  // Sync state changes with the popup's local cache
+  const frameEls = frameMap.get(fid);
+  if (frameEls) {
+    const el = frameEls.get(elid);
+    if (el) {
+      el.settings = { ...(el.settings || {}), ...newSettings };
+    }
+  }
+
+  // Route configurations down to the content script runtime inside the target frame
+  return chrome.tabs.sendMessage(
+    tid,
+    {
+      action: "APPLY_SETTINGS",
+      elementId: elid,
+      settings: newSettings,
+      fallbackMode: defaultMode
     },
-    args: [fid, elid, newSettings],
-  });
+    { frameId: Number(fid) }
+  ).catch((err) => console.error(`[SoundFixer] Frame ${fid} communication failed:`, err));
 }
 
+/**
+ * Two-way binding helper that links a range slider and a numeric input box.
+ * Standardizes inputs, enforces constraints, and normalizes output precision.
+ * * @param {HTMLElement} parent - Container node containing the input controls.
+ * @param {string} rangeSelector - CSS selector for the HTML range input.
+ * @param {string} numSelector - CSS selector for the HTML number input.
+ * @param {number} initialValue - Startup value to populate the controls.
+ * @param {Function} onChange - Event callback executed on valid input mutations.
+ */
+function setupLinkedInputs(parent, rangeSelector, numSelector, initialValue, onChange) {
+  const rangeInput = parent.querySelector(rangeSelector);
+  const numInput = parent.querySelector(numSelector);
+
+  // Enforces boundaries, transforms inputs, and updates both elements simultaneously
+  const setValues = (val) => {
+    let v = +val;
+    if (isNaN(v)) v = 1;
+    const max = numInput.hasAttribute("max") ? +numInput.getAttribute("max") : Infinity;
+    const min = numInput.hasAttribute("min") ? +numInput.getAttribute("min") : -Infinity;
+    
+    if (v > max) v = max;
+    if (v < min) v = min;
+
+    const formatted = v.toFixed(2);
+    rangeInput.value = formatted;
+    numInput.value = formatted;
+    return v;
+  };
+
+  // Initialize UI presentation
+  setValues(initialValue);
+
+  // Bind input listeners for continuous real-time changes
+  rangeInput.addEventListener("input", () => {
+    const v = setValues(rangeInput.value);
+    onChange(v);
+  });
+
+  numInput.addEventListener("input", () => {
+    const v = setValues(numInput.value);
+    onChange(v);
+  });
+
+  return {
+    updateValue: (val) => setValues(val)
+  };
+}
+
+/**
+ * Binds DOM input listeners for a given media control block and populates baseline values.
+ * * @param {HTMLElement} container - The wrapper DOM fragment for the control element.
+ * @param {Object} initialSettings - Initial configuration snapshot.
+ * @param {Function} onSettingChange - Broadcaster callback triggered by any state modifications.
+ */
+function bindElementControls(container, initialSettings, onSettingChange) {
+  const modeSelect = container.querySelector(".element-mode");
+  const monoCheckbox = container.querySelector(".element-mono");
+  const flipCheckbox = container.querySelector(".element-flip");
+  const resetBtn = container.querySelector(".element-reset");
+
+  // Populate base options
+  modeSelect.value = initialSettings.mode || defaultMode;
+  monoCheckbox.checked = initialSettings.mono || false;
+  flipCheckbox.checked = initialSettings.flip || false;
+
+  // Initialize and link gain and pan controls
+  const gainController = setupLinkedInputs(container, ".element-gain", ".element-gain-num", initialSettings.gain ?? 1, (val) => {
+    onSettingChange({ gain: val });
+  });
+
+  const panController = setupLinkedInputs(container, ".element-pan", ".element-pan-num", initialSettings.pan ?? 0, (val) => {
+    onSettingChange({ pan: val });
+  });
+
+  // Attach structural event listeners
+  modeSelect.addEventListener("change", (e) => onSettingChange({ mode: e.target.value }));
+  monoCheckbox.addEventListener("change", (e) => onSettingChange({ mono: e.target.checked }));
+  flipCheckbox.addEventListener("change", (e) => onSettingChange({ flip: e.target.checked }));
+
+  return {
+    resetBtn,
+    // Expose programmatic update path to sync changes safely from the global panel
+    updateUI: (settings) => {
+      if ("gain" in settings) gainController.updateValue(settings.gain);
+      if ("pan" in settings) panController.updateValue(settings.pan);
+      if ("mode" in settings) modeSelect.value = settings.mode;
+      if ("mono" in settings) monoCheckbox.checked = settings.mono;
+      if ("flip" in settings) flipCheckbox.checked = settings.flip;
+    }
+  };
+}
+
+/**
+ * Coordinates and renders the entire extension interface.
+ * Generates both individual track items and the overarching master control layer.
+ */
 function renderUI() {
   elementsList.textContent = "";
+  allElements.textContent = "";
+  uiRegistry.clear();
+  
   let elCount = 0;
 
+  // 1. Build discrete configuration nodes for every detected media asset
   for (const [fid, els] of frameMap) {
     for (const [elid, el] of els) {
       const settings = el.settings || {};
-      const node = document.createElement("li");
-      node.appendChild(document.importNode(elementsTpl.content, true));
-      node.dataset.fid = fid;
-      node.dataset.elid = elid;
+      const li = document.createElement("li");
+      li.appendChild(document.importNode(elementsTpl.content, true));
+      li.dataset.fid = fid;
+      li.dataset.elid = elid;
 
-      const label = node.querySelector(".element-label");
+      // Labeling item context metadata (Type, sequence index, and activity state)
+      const label = li.querySelector(".element-label");
       label.textContent = `
         ${el.type.charAt(0).toUpperCase() + el.type.slice(1)}
         ${elCount + 1}
@@ -80,236 +170,281 @@ function renderUI() {
       `.trim();
       if (!el.isPlaying) label.classList.add("element-not-playing");
 
-      const gain = node.querySelector(".element-gain");
-      const gainNum = node.querySelector(".element-gain-num");
-      gain.value = (settings.gain || 1).toFixed(2);
-      gainNum.value = gain.value;
-      gain.addEventListener("input", function () {
-        applySettings(fid, elid, { gain: this.value });
-        gainNum.value = (+this.value).toFixed(2);
-      });
-      gainNum.addEventListener("input", function () {
-        if (+this.value > +this.getAttribute("max"))
-          this.value = this.getAttribute("max");
-        if (+this.value < +this.getAttribute("min"))
-          this.value = this.getAttribute("min");
-        applySettings(fid, elid, { gain: this.value });
-        gain.value = (+this.value).toFixed(2);
+      // Bind input events to remote messaging calls
+      const controls = bindElementControls(li, settings, (newSettings) => {
+        if ("mode" in newSettings) {
+          defaultMode = newSettings.mode;
+          chrome.storage.local.set({ defaultMode });
+        }
+        applySettings(fid, elid, newSettings);
       });
 
-      const pan = node.querySelector(".element-pan");
-      const panNum = node.querySelector(".element-pan-num");
-      pan.value = (settings.pan || 0).toFixed(2);
-      panNum.value = pan.value;
-      pan.addEventListener("input", function () {
-        applySettings(fid, elid, { pan: this.value });
-        panNum.value = (+this.value).toFixed(2);
-      });
-      panNum.addEventListener("input", function () {
-        if (+this.value > +this.getAttribute("max"))
-          this.value = this.getAttribute("max");
-        if (+this.value < +this.getAttribute("min"))
-          this.value = this.getAttribute("min");
-        applySettings(fid, elid, { pan: this.value });
-        pan.value = (+this.value).toFixed(2);
-      });
-
-      const mono = node.querySelector(".element-mono");
-      mono.checked = settings.mono || false;
-      mono.addEventListener("change", () => {
-        applySettings(fid, elid, { mono: mono.checked });
-      });
-
-      const flip = node.querySelector(".element-flip");
-      flip.checked = settings.flip || false;
-      flip.addEventListener("change", () => {
-        applySettings(fid, elid, { flip: flip.checked });
-      });
-
-      node.querySelector(".element-reset").onclick = () => {
-        gain.value = 1;
-        gainNum.value = "1";
-        pan.value = 0;
-        panNum.value = "0";
-        mono.checked = false;
-        flip.checked = false;
-        applySettings(fid, elid, { gain: 1, pan: 0, mono: false, flip: false });
+      // Localized reset handling
+      controls.resetBtn.onclick = () => {
+        const defaults = { gain: 1, pan: 0, mono: false, flip: false, mode: defaultMode };
+        controls.updateUI(defaults);
+        applySettings(fid, elid, defaults);
       };
 
-      elementsList.appendChild(node);
+      // Register interface reference for global overrides and append to container
+      uiRegistry.set(`${fid}-${elid}`, controls);
+      elementsList.appendChild(li);
       elCount++;
     }
   }
 
+  // Handle empty state situations safely
   if (elCount === 0) {
-    allElements.innerHTML =
-      "No audio/video found in the current tab. Note that some websites do not work because of cross-domain security restrictions.";
+    allElements.innerHTML = "No audio/video found in the current tab. Note that some websites do not work because of cross-domain security restrictions.";
     indivElements.remove();
     return;
   }
 
-  // Initialize from first element's settings (like Firefox version)
-  let firstSettings = { gain: 1, pan: 0, mono: false, flip: false };
+  // 2. Derive master control panel baseline states from the first responsive element found
+  let firstSettings = { gain: 1, pan: 0, mono: false, flip: false, mode: defaultMode };
+  let foundFirst = false;
   for (const [, els] of frameMap) {
     for (const [, el] of els) {
-      if (el.settings) {
+      if (el.settings && Object.keys(el.settings).length > 0) {
         firstSettings = {
           gain: el.settings.gain ?? 1,
           pan: el.settings.pan ?? 0,
           mono: el.settings.mono ?? false,
-          flip: el.settings.flip ?? false
+          flip: el.settings.flip ?? false,
+          mode: el.settings.mode ?? defaultMode
         };
+        foundFirst = true;
         break;
       }
     }
-    break;
+    if (foundFirst) break;
   }
 
-  const wrapper = document.createElement("div");
-  wrapper.appendChild(document.importNode(elementsTpl.content, true));
-  wrapper.querySelector(".element-label").textContent = "All media on the page";
+  // 3. Assemble and initialize the "All media on the page" control deck
+  const globalWrapper = document.createElement("div");
+  globalWrapper.appendChild(document.importNode(elementsTpl.content, true));
+  globalWrapper.querySelector(".element-label").textContent = "All media on the page";
 
-  const allGain = wrapper.querySelector(".element-gain");
-  const allGainNum = wrapper.querySelector(".element-gain-num");
-  allGain.value = (+firstSettings.gain).toFixed(2);
-  allGainNum.value = allGain.value;
-  function applyGain(v) {
+  const globalControls = bindElementControls(globalWrapper, firstSettings, (newSettings) => {
+    if ("mode" in newSettings) {
+      defaultMode = newSettings.mode;
+      chrome.storage.local.set({ defaultMode });
+    }
+    
+    // Broadcast setting adjustments to all tracks and update their visual presentation
     frameMap.forEach((els, fid) => {
       els.forEach((_, elid) => {
-        applySettings(fid, elid, { gain: v });
-        const eg = document.querySelector(`[data-fid="${fid}"][data-elid="${elid}"] .element-gain`);
-        if (eg) {
-          eg.value = v;
-          eg.parentElement.querySelector(".element-gain-num").value = "" + v;
-        }
-      });
-    });
-    allGain.value = (+v).toFixed(2);
-    allGainNum.value = (+v).toFixed(2);
-  }
-  allGain.addEventListener("input", () => applyGain(allGain.value));
-  allGainNum.addEventListener("input", function () {
-    if (+this.value > +this.getAttribute("max"))
-      this.value = this.getAttribute("max");
-    if (+this.value < +this.getAttribute("min"))
-      this.value = this.getAttribute("min");
-    applyGain(+this.value);
-  });
-
-  const allPan = wrapper.querySelector(".element-pan");
-  const allPanNum = wrapper.querySelector(".element-pan-num");
-  allPan.value = firstSettings.pan;
-  allPanNum.value = (+firstSettings.pan).toFixed(2);
-  function applyPan(v) {
-    frameMap.forEach((els, fid) => {
-      els.forEach((_, elid) => {
-        applySettings(fid, elid, { pan: v });
-        const ep = document.querySelector(`[data-fid="${fid}"][data-elid="${elid}"] .element-pan`);
-        if (ep) {
-          ep.value = v;
-          ep.parentElement.querySelector(".element-pan-num").value = "" + v;
-        }
-      });
-    });
-    allPan.value = (+v).toFixed(2);
-    allPanNum.value = (+v).toFixed(2);
-  }
-  allPan.addEventListener("input", () => applyPan(allPan.value));
-  allPanNum.addEventListener("input", function () {
-    if (+this.value > +this.getAttribute("max"))
-      this.value = this.getAttribute("max");
-    if (+this.value < +this.getAttribute("min"))
-      this.value = this.getAttribute("min");
-    applyPan(+this.value);
-  });
-
-  const allMono = wrapper.querySelector(".element-mono");
-  allMono.checked = firstSettings.mono;
-  allMono.addEventListener("change", () => {
-    frameMap.forEach((els, fid) => {
-      els.forEach((_, elid) => {
-        applySettings(fid, elid, { mono: allMono.checked });
-        const emono = document.querySelector(`[data-fid="${fid}"][data-elid="${elid}"] .element-mono`);
-        if (emono) emono.checked = allMono.checked;
+        applySettings(fid, elid, newSettings);
+        const childUI = uiRegistry.get(`${fid}-${elid}`);
+        if (childUI) childUI.updateUI(newSettings);
       });
     });
   });
 
-  const allFlip = wrapper.querySelector(".element-flip");
-  allFlip.checked = firstSettings.flip;
-  allFlip.addEventListener("change", () => {
+  // Global reset deck actions
+  globalControls.resetBtn.onclick = () => {
+    const defaults = { gain: 1, pan: 0, mono: false, flip: false, mode: defaultMode };
+    globalControls.updateUI(defaults);
+    
     frameMap.forEach((els, fid) => {
       els.forEach((_, elid) => {
-        applySettings(fid, elid, { flip: allFlip.checked });
-        const eflip = document.querySelector(`[data-fid="${fid}"][data-elid="${elid}"] .element-flip`);
-        if (eflip) eflip.checked = allFlip.checked;
-      });
-    });
-  });
-
-  wrapper.querySelector(".element-reset").onclick = () => {
-    allGain.value = 1;
-    allGainNum.value = "1";
-    allPan.value = 0;
-    allPanNum.value = "0";
-    allMono.checked = false;
-    allFlip.checked = false;
-    frameMap.forEach((els, fid) => {
-      els.forEach((_, elid) => {
-        const egain = document.querySelector(`[data-fid="${fid}"][data-elid="${elid}"] .element-gain`);
-        if (egain) {
-          egain.value = 1;
-          egain.parentElement.querySelector(".element-gain-num").value = "1";
-        }
-        const epan = document.querySelector(`[data-fid="${fid}"][data-elid="${elid}"] .element-pan`);
-        if (epan) {
-          epan.value = 0;
-          epan.parentElement.querySelector(".element-pan-num").value = "0";
-        }
-        const emono = document.querySelector(`[data-fid="${fid}"][data-elid="${elid}"] .element-mono`);
-        if (emono) emono.checked = false;
-        const eflip = document.querySelector(`[data-fid="${fid}"][data-elid="${elid}"] .element-flip`);
-        if (eflip) eflip.checked = false;
-        applySettings(fid, elid, { gain: 1, pan: 0, mono: false, flip: false });
+        applySettings(fid, elid, defaults);
+        const childUI = uiRegistry.get(`${fid}-${elid}`);
+        if (childUI) childUI.updateUI(defaults);
       });
     });
   };
 
-  allElements.appendChild(wrapper);
+  allElements.appendChild(globalWrapper);
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-  chrome.tabs
-    .query({ currentWindow: true, active: true })
-    .then((tabs) => {
-      tid = tabs[0].id;
-      return chrome.scripting.executeScript({
-        target: { tabId: tid, allFrames: true },
-        func: () => {
-          const list = [];
-          for (const el of document.querySelectorAll("video,audio")) {
-            if (!el.hasAttribute("data-x-soundfixer-id")) {
-              el.setAttribute("data-x-soundfixer-id", Math.random().toString(36).substring(2, 12));
-            }
-            list.push([
-              el.getAttribute("data-x-soundfixer-id"),
-              {
-                type: el.tagName.toLowerCase(),
-                isPlaying: el.currentTime > 0 && !el.paused && !el.ended && el.readyState > 2,
-                settings: el.xSoundFixerSettings || {},
-              },
-            ]);
+/**
+ * Injected Content Script Initializer. Runs within the Isolated World of the target webpage.
+ * Establishes a persistent communication listener and provisions Web Audio API processing pipelines.
+ * * @param {string} fallbackMode - Active operational baseline setting.
+ */
+function contentScriptInit(fallbackMode) {
+  // Prevent duplicate setup footprints on subsequent popup initializations
+  if (!window.xSoundFixerInitialized) {
+    window.xSoundFixerInitialized = true;
+    
+    // Core isolated storage registry housing audio nodes securely away from host scripts
+    window.xSoundFixerGraphs = window.xSoundFixerGraphs || new Map();
+
+    // Structural JSON request router for inbound adjustment signals
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message.action === "APPLY_SETTINGS") {
+        const { elementId, settings, fallbackMode: fbMode } = message;
+        const el = document.querySelector(`[data-x-soundfixer-id="${elementId}"]`);
+        if (!el) {
+          sendResponse({ success: false, error: "Element not found" });
+          return;
+        }
+
+        // Lazy-load Web Audio context graph node chains on demand
+        let graph = window.xSoundFixerGraphs.get(elementId);
+        if (!graph) {
+          const ctx = new AudioContext();
+          const limiter = ctx.createDynamicsCompressor();
+          
+          // Configure protective anti-clipping dynamics parameters
+          limiter.threshold.setValueAtTime(-0.5, ctx.currentTime);
+          limiter.knee.setValueAtTime(0, ctx.currentTime);
+          limiter.ratio.setValueAtTime(20, ctx.currentTime);
+          limiter.attack.setValueAtTime(0, ctx.currentTime);
+          limiter.release.setValueAtTime(0.1, ctx.currentTime);
+
+          graph = {
+            ctx,
+            gain: ctx.createGain(),
+            pan: ctx.createStereoPanner(),
+            limiter,
+            split: ctx.createChannelSplitter(2),
+            merge: ctx.createChannelMerger(2),
+            source: ctx.createMediaElementSource(el),
+            mode: settings.mode || fbMode,
+            flipped: false,
+            originalChannels: ctx.destination.channelCount,
+            settings: {}
+          };
+
+          // Form structural wiring harness
+          graph.source.connect(graph.gain);
+          graph.gain.connect(graph.pan);
+
+          if (graph.mode === "compressor") {
+            graph.pan.connect(graph.limiter);
+            graph.limiter.connect(ctx.destination);
+          } else {
+            graph.pan.connect(ctx.destination);
           }
-          return list;
-        },
-      });
-    })
-    .then((results) => {
-      frameMap.clear();
-      for (const { frameId, result } of results) {
+          window.xSoundFixerGraphs.set(elementId, graph);
+        }
+
+        // Apply parameter modifiers safely
+        if ("gain" in settings) graph.gain.gain.value = settings.gain;
+        if ("pan" in settings) graph.pan.pan.value = settings.pan;
+        if ("mono" in settings) graph.ctx.destination.channelCount = settings.mono ? 1 : graph.originalChannels;
+
+        // Trace routing changes (Compressor mode toggling or Stereo Channel inversion)
+        let graphChanged = false;
+        if ("mode" in settings && settings.mode !== graph.mode) {
+          graph.mode = settings.mode;
+          graphChanged = true;
+        }
+        if ("flip" in settings && settings.flip !== graph.flipped) {
+          graph.flipped = settings.flip;
+          graphChanged = true;
+        }
+
+        // Reconstruct nodes configuration pipelines dynamically if transformations occur
+        if (graphChanged) {
+          graph.pan.disconnect();
+          graph.merge.disconnect();
+          graph.limiter.disconnect();
+
+          let lastNode = graph.pan;
+          
+          // Cross-wire left and right channel positions when channel flip is toggled
+          if (graph.flipped) {
+            graph.pan.connect(graph.split);
+            graph.split.connect(graph.merge, 0, 1); // Left -> Right
+            graph.split.connect(graph.merge, 1, 0); // Right -> Left
+            lastNode = graph.merge;
+          }
+
+          // Route target to terminal speakers or intermediate safety limiter blocks
+          if (graph.mode === "compressor") {
+            lastNode.connect(graph.limiter);
+            graph.limiter.connect(graph.ctx.destination);
+          } else {
+            lastNode.connect(graph.ctx.destination);
+          }
+        }
+
+        // Persist internal settings snapshot
+        graph.settings = {
+          gain: graph.gain.gain.value,
+          pan: graph.pan.pan.value,
+          mono: graph.ctx.destination.channelCount === 1,
+          flip: graph.flipped,
+          mode: graph.mode
+        };
+        
+        sendResponse({ success: true, settings: graph.settings });
+      }
+    });
+  }
+
+  // Scan document structure, assign trace indexes, and return state payload
+  const list = [];
+  for (const el of document.querySelectorAll("video,audio")) {
+    if (!el.hasAttribute("data-x-soundfixer-id")) {
+      el.setAttribute("data-x-soundfixer-id", Math.random().toString(36).substring(2, 12));
+    }
+    const elid = el.getAttribute("data-x-soundfixer-id");
+    const graph = window.xSoundFixerGraphs.get(elid);
+    
+    list.push([
+      elid,
+      {
+        type: el.tagName.toLowerCase(),
+        isPlaying: el.currentTime > 0 && !el.paused && !el.ended && el.readyState > 2,
+        settings: graph ? graph.settings : { mode: fallbackMode },
+      },
+    ]);
+  }
+  return list;
+}
+
+/**
+ * Main application orchestration routine.
+ * Resolves persistent properties, injects content scripts, and builds the popup rendering layer.
+ */
+document.addEventListener("DOMContentLoaded", () => {
+  chrome.storage.local.get({ defaultMode: "gain" }).then((storage) => {
+    defaultMode = storage.defaultMode;
+    return chrome.tabs.query({ currentWindow: true, active: true });
+  })
+  .then((tabs) => {
+    if (!tabs || tabs.length === 0) return;
+    tid = tabs[0].id;
+    
+    // Inject core processing layer to all frames targeting the user's active window viewport
+    return chrome.scripting.executeScript({
+      target: { tabId: tid, allFrames: true },
+      func: contentScriptInit,
+      args: [defaultMode]
+    });
+  })
+  .then((results) => {
+    if (!results) return;
+    frameMap.clear();
+
+    // Construct local tracking tables from the collected frame analysis reports
+    for (const { frameId, result } of results) {
+      if (result && result.length > 0) {
         frameMap.set(frameId, new Map(result));
       }
-      renderUI();
-    })
-    .catch(() => {});
+    }
+    // Render out final actionable interface controls
+    renderUI();
+  })
+  .catch((err) => {
+    console.error("[SoundFixer] initialization failed:", err);
+    
+    // Check if it's a browser security restriction page
+    if (
+      err.message.includes("cannot be scripted") || 
+      err.message.includes("restricted") || 
+      err.message.includes("chrome://") || 
+      err.message.includes("cannot access")
+    ) {
+      allElements.innerHTML = "SoundFixer cannot run on Browser internal pages or the Chrome Web Store due to browser security restrictions.";
+      if (indivElements) indivElements.remove();
+    } else {
+      // Other unexpected errors
+      allElements.innerHTML = "An unexpected error occurred during initialization.";
+    }
+  });
 });
